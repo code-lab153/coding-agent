@@ -7,6 +7,10 @@
 .pytest_cache/
 *.pyc
 
-# Local assessment materials
+# Local reference files
 tmp/
-推免考核题目学生版.pdf
+*.pdf
+
+# Runtime coding workspace
+workspace/*
+!workspace/.gitkeep
