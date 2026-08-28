@@ -1,0 +1,12 @@
+# Local credentials and environments
+.env
+.venv/
+
+# Python-generated files
+**/__pycache__/
+.pytest_cache/
+*.pyc
+
+# Local assessment materials
+tmp/
+推免考核题目学生版.pdf
