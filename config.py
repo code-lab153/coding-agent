@@ -1,6 +1,9 @@
-"""Runtime configuration skeleton.
+"""Non-secret runtime configuration for the coding agent."""
 
-This module will later load non-secret settings and credential values from the
-environment, including workspace limits, model settings, step limits, command
-timeouts, and output limits. Real secrets must never be stored in source code.
-"""
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+WORKSPACE_ROOT = (PROJECT_ROOT / "workspace").resolve()
+COMMAND_TIMEOUT = 30.0
+MAX_TOOL_OUTPUT = 12_000
