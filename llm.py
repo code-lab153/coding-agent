@@ -1,6 +1,7 @@
-"""Minimal synchronous model communication through the Responses API."""
+"""Synchronous model communication through the Responses API."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, is_dataclass
 import json
 from typing import Any
 
@@ -9,7 +10,7 @@ from openai import OpenAI
 from config import ModelConfig, load_model_config
 
 
-Message = dict[str, str]
+InputItem = dict[str, object]
 _ALLOWED_ROLES = {"system", "user", "assistant"}
 
 
@@ -28,10 +29,11 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class LLMResponse:
-    """Provider-independent text and requested function calls."""
+    """Provider-independent model output needed by the Agent."""
 
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
+    continuation_items: tuple[InputItem, ...] = ()
 
 
 class LLMClient:
@@ -51,11 +53,11 @@ class LLMClient:
 
     def send(
         self,
-        messages: list[Message],
+        messages: list[InputItem],
         tools: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
     ) -> LLMResponse:
         """Send messages and normalize text plus requested function calls."""
-        normalized_messages = _validate_messages(messages)
+        normalized_messages = _validate_input_items(messages)
         request_options: dict[str, Any] = {
             "model": self._config.model_name,
             "input": normalized_messages,
@@ -75,29 +77,94 @@ class LLMClient:
         raw_text = getattr(provider_response, "output_text", None)
         text = raw_text if isinstance(raw_text, str) and raw_text.strip() else ""
         tool_calls = _parse_tool_calls(provider_response)
+        continuation_items = _serialize_output_items(provider_response)
         if not text and not tool_calls:
             raise LLMError("Model response did not contain text or tool calls.")
-        return LLMResponse(text=text, tool_calls=tool_calls)
+        return LLMResponse(
+            text=text,
+            tool_calls=tool_calls,
+            continuation_items=continuation_items,
+        )
 
 
-def _validate_messages(messages: list[Message]) -> list[Message]:
-    """Validate and copy the small message format accepted in Phase 3."""
+def _validate_input_items(messages: list[InputItem]) -> list[InputItem]:
+    """Validate and copy plain message and continuation input items."""
     if not isinstance(messages, list) or not messages:
         raise LLMError("Messages must be a non-empty list.")
 
-    normalized: list[Message] = []
+    normalized: list[InputItem] = []
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             raise LLMError(f"Message {index} must be a dictionary.")
 
-        role = message.get("role")
-        content = message.get("content")
-        if role not in _ALLOWED_ROLES:
-            raise LLMError(f"Message {index} has an unsupported role.")
-        if not isinstance(content, str) or not content.strip():
-            raise LLMError(f"Message {index} must contain non-empty text.")
-        normalized.append({"role": role, "content": content})
+        item_type = message.get("type")
+        if item_type is None:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in _ALLOWED_ROLES:
+                raise LLMError(f"Message {index} has an unsupported role.")
+            if not isinstance(content, str) or not content.strip():
+                raise LLMError(f"Message {index} must contain non-empty text.")
+            normalized.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(item_type, str) or not item_type.strip():
+            raise LLMError(f"Message {index} has an invalid item type.")
+        if item_type == "function_call_output":
+            call_id = message.get("call_id")
+            output = message.get("output")
+            if not isinstance(call_id, str) or not call_id.strip():
+                raise LLMError(f"Message {index} has an invalid call_id.")
+            if not isinstance(output, str):
+                raise LLMError(f"Message {index} must contain string tool output.")
+
+        plain_item = _to_plain_data(message)
+        if not isinstance(plain_item, dict):
+            raise LLMError(f"Message {index} could not be serialized.")
+        normalized.append(plain_item)
     return normalized
+
+
+def _serialize_output_items(provider_response: object) -> tuple[InputItem, ...]:
+    """Convert all provider output items into replayable plain dictionaries."""
+    output_items = getattr(provider_response, "output", None)
+    if output_items is None:
+        return ()
+    if not isinstance(output_items, (list, tuple)):
+        raise LLMError("Model response output items were malformed.")
+
+    continuation_items: list[InputItem] = []
+    for item in output_items:
+        plain_item = _to_plain_data(item)
+        if not isinstance(plain_item, dict):
+            raise LLMError("Model response contained an unserializable output item.")
+        continuation_items.append(plain_item)
+    return tuple(continuation_items)
+
+
+def _to_plain_data(value: object) -> object:
+    """Recursively remove SDK objects while preserving JSON-compatible data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        plain_mapping: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise LLMError("Provider data contained a non-string object key.")
+            plain_mapping[key] = _to_plain_data(item)
+        return plain_mapping
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_data(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return _to_plain_data(asdict(value))
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _to_plain_data(model_dump(mode="json"))
+        except Exception:
+            raise LLMError("Could not serialize a provider output item.") from None
+    raise LLMError("Could not serialize a provider output item.")
 
 
 def _parse_tool_calls(provider_response: object) -> tuple[ToolCall, ...]:

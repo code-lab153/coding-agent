@@ -1,6 +1,7 @@
 """Tests for the minimal, network-free LLM communication layer."""
 
 from dataclasses import dataclass, field
+import json
 from typing import Any
 
 import pytest
@@ -27,6 +28,17 @@ class FakeFunctionCall:
     name: str
     arguments: str
     type: str = "function_call"
+
+
+class FakeSDKItem:
+    """Stand in for an SDK model that can produce JSON-mode plain data."""
+
+    def __init__(self, data: dict[str, object]) -> None:
+        self.data = data
+
+    def model_dump(self, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        return self.data
 
 
 class FakeResponsesAPI:
@@ -184,6 +196,14 @@ def test_single_function_call_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None
         tool_calls=(
             ToolCall("call_123", "read_file", {"path": "main.py"}),
         ),
+        continuation_items=(
+            {
+                "call_id": "call_123",
+                "name": "read_file",
+                "arguments": '{"path":"main.py"}',
+                "type": "function_call",
+            },
+        ),
     )
 
 
@@ -333,3 +353,89 @@ def test_parsing_does_not_execute_handler(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert result.tool_calls[0].name == "read_file"
     assert not executed
+
+
+def test_provider_output_becomes_plain_replayable_continuation_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_valid_environment(monkeypatch)
+    reasoning = FakeSDKItem(
+        {"id": "rs_1", "type": "reasoning", "summary": [], "content": []}
+    )
+    message = FakeSDKItem(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Done."}],
+        }
+    )
+    install_fake_openai(
+        monkeypatch, FakeProviderResponse("Done.", [reasoning, message])
+    )
+
+    result = LLMClient().send([{"role": "user", "content": "Finish"}])
+
+    assert result.continuation_items == (
+        {"id": "rs_1", "type": "reasoning", "summary": [], "content": []},
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Done."}],
+        },
+    )
+    assert all(isinstance(item, dict) for item in result.continuation_items)
+    assert reasoning not in result.continuation_items
+    assert message not in result.continuation_items
+    json.dumps(result.continuation_items)
+
+
+def test_continuation_and_function_output_can_be_sent_in_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_valid_environment(monkeypatch)
+    provider_call = FakeFunctionCall("call_keep", "read_file", '{"path":"main.py"}')
+    _, fake_responses = install_fake_openai(
+        monkeypatch, FakeProviderResponse("", [provider_call])
+    )
+    client = LLMClient()
+    first_input = [{"role": "user", "content": "Read main.py"}]
+
+    first_result = client.send(first_input, tools=TOOL_SCHEMAS)
+    next_input = [
+        *first_input,
+        *first_result.continuation_items,
+        {
+            "type": "function_call_output",
+            "call_id": "call_keep",
+            "output": '{"success":true,"output":"contents","error":null}',
+        },
+    ]
+    fake_responses.response = FakeProviderResponse("Finished.")
+
+    result = client.send(next_input, tools=TOOL_SCHEMAS)
+
+    assert result.text == "Finished."
+    assert fake_responses.calls[1]["input"] == next_input
+
+
+def test_function_call_output_requires_string_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_valid_environment(monkeypatch)
+    install_fake_openai(monkeypatch)
+
+    with pytest.raises(LLMError, match="string tool output"):
+        LLMClient().send(
+            [
+                {"role": "user", "content": "Read a file"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": {"success": True},
+                },
+            ]
+        )
