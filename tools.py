@@ -1,5 +1,6 @@
 """Small, model-independent tools that operate on the local workspace."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import unified_diff
 import locale
@@ -208,3 +209,87 @@ def run_command(command: str) -> ToolResult:
         )
     except OSError as exc:
         return ToolResult(False, error=f"Could not start command: {exc}")
+
+
+TOOL_SCHEMAS: tuple[dict[str, object], ...] = (
+    {
+        "type": "function",
+        "name": "list_files",
+        "description": "List files and directories in a workspace-relative directory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to the workspace; omit for the root.",
+                }
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        "strict": False,
+    },
+    {
+        "type": "function",
+        "name": "read_file",
+        "description": "Read a UTF-8 text file from the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the workspace.",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "write_file",
+        "description": "Create or replace a UTF-8 text file in the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the workspace.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete text content to write.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "run_command",
+        "description": "Run a shell command locally from the workspace directory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to run.",
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+)
+
+
+TOOL_HANDLERS: dict[str, Callable[..., ToolResult]] = {
+    "list_files": list_files,
+    "read_file": read_file,
+    "write_file": write_file,
+    "run_command": run_command,
+}

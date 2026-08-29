@@ -1,5 +1,6 @@
 """Tests for the model-independent local tool layer."""
 
+import json
 import os
 from pathlib import Path
 import shlex
@@ -9,7 +10,14 @@ import sys
 import pytest
 
 import config
-from tools import list_files, read_file, run_command, write_file
+from tools import (
+    TOOL_HANDLERS,
+    TOOL_SCHEMAS,
+    list_files,
+    read_file,
+    run_command,
+    write_file,
+)
 
 
 @pytest.fixture
@@ -238,3 +246,41 @@ def test_run_command_truncates_output(
     assert result.success
     assert len(result.output) <= 80
     assert "truncated" in result.output
+
+
+def test_tool_schemas_cover_all_local_tools() -> None:
+    names = {schema["name"] for schema in TOOL_SCHEMAS}
+
+    assert names == {"list_files", "read_file", "write_file", "run_command"}
+    assert set(TOOL_HANDLERS) == names
+    assert all(callable(handler) for handler in TOOL_HANDLERS.values())
+
+
+def test_tool_schema_required_arguments_are_accurate() -> None:
+    schemas = {schema["name"]: schema for schema in TOOL_SCHEMAS}
+
+    assert schemas["list_files"]["parameters"]["required"] == []
+    assert schemas["read_file"]["parameters"]["required"] == ["path"]
+    assert schemas["write_file"]["parameters"]["required"] == ["path", "content"]
+    assert schemas["run_command"]["parameters"]["required"] == ["command"]
+
+
+def test_tool_schemas_are_explicit_function_definitions() -> None:
+    for schema in TOOL_SCHEMAS:
+        assert schema["type"] == "function"
+        assert isinstance(schema["name"], str)
+        assert isinstance(schema["description"], str)
+        assert schema["parameters"]["type"] == "object"
+        assert schema["parameters"]["additionalProperties"] is False
+
+    assert TOOL_SCHEMAS[0]["strict"] is False
+    assert all(schema["strict"] is True for schema in TOOL_SCHEMAS[1:])
+
+
+def test_tool_schemas_do_not_expose_local_identity_or_absolute_paths() -> None:
+    serialized = json.dumps(TOOL_SCHEMAS).lower()
+
+    assert ":\\\\" not in serialized
+    assert ":/" not in serialized
+    assert "workspace_root" not in serialized
+    assert "users/" not in serialized

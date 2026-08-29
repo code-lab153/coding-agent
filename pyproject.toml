@@ -7,7 +7,7 @@ name = "coding-agent"
 version = "0.1.0"
 description = "A small, understandable coding agent built without agent frameworks."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["openai>=2.0,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
