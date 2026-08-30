@@ -335,3 +335,89 @@ def test_system_prompt_sets_role_evidence_and_verification_expectations() -> Non
     assert "coding agent" in prompt
     assert "evidence" in prompt
     assert "verify" in prompt
+
+
+def test_trace_shows_step_tool_arguments_and_successful_result() -> None:
+    trace: list[str] = []
+    fake_llm = FakeLLMClient(
+        [
+            tool_response("call_1", "read_file", {"path": "main.py"}),
+            LLMResponse("Done."),
+        ]
+    )
+
+    Agent(
+        fake_llm,
+        tool_handlers={"read_file": lambda path: ToolResult(True, f"read {path}")},
+        trace=trace.append,
+    ).run("Read main.py")
+
+    assert len(trace) == 1
+    assert "[Step 1/20]" in trace[0]
+    assert "Tool: read_file" in trace[0]
+    assert '"path": "main.py"' in trace[0]
+    assert "success: true" in trace[0]
+    assert "read main.py" in trace[0]
+
+
+def test_trace_shows_failure_but_tool_failure_does_not_stop_agent() -> None:
+    trace: list[str] = []
+    fake_llm = FakeLLMClient(
+        [
+            tool_response("call_1", "run_command", {"command": "pytest"}),
+            LLMResponse("I recovered from the failure."),
+        ]
+    )
+
+    result = Agent(
+        fake_llm,
+        tool_handlers={
+            "run_command": lambda command: ToolResult(
+                False,
+                output=f"{command}: one test failed",
+                error="Command exited with return code 1.",
+            )
+        },
+        trace=trace.append,
+    ).run("Fix tests")
+
+    assert result == "I recovered from the failure."
+    assert "success: false" in trace[0]
+    assert "one test failed" in trace[0]
+    assert "return code 1" in trace[0]
+    assert len(fake_llm.calls) == 2
+
+
+def test_trace_redacts_secrets_and_never_prints_reasoning_items() -> None:
+    trace: list[str] = []
+    private_reasoning = "hidden private reasoning must not appear"
+    command = "echo MODEL_API_KEY=super-secret-value"
+    fake_llm = FakeLLMClient(
+        [
+            tool_response(
+                "call_1",
+                "run_command",
+                {"command": command},
+                extra_items=(
+                    {
+                        "type": "reasoning",
+                        "summary": [private_reasoning],
+                    },
+                ),
+            ),
+            LLMResponse("Done."),
+        ]
+    )
+
+    Agent(
+        fake_llm,
+        tool_handlers={
+            "run_command": lambda command: ToolResult(True, output=command)
+        },
+        trace=trace.append,
+    ).run("Run a command")
+
+    rendered = "\n".join(trace)
+    assert "super-secret-value" not in rendered
+    assert private_reasoning not in rendered
+    assert "[redacted]" in rendered

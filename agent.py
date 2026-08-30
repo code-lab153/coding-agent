@@ -2,11 +2,18 @@
 
 from collections.abc import Callable, Mapping, Sequence
 import json
+import re
 
 from config import MAX_STEPS
 from llm import InputItem, LLMClient, LLMError, ToolCall
 from prompts import SYSTEM_PROMPT
 from tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolResult
+
+
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:MODEL_API_KEY|API_KEY|TOKEN|PASSWORD|SECRET)\s*[:=]\s*)(\S+)"
+)
+_SECRET_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 
 
 class AgentError(RuntimeError):
@@ -22,6 +29,7 @@ class Agent:
         tool_schemas: Sequence[dict[str, object]] = TOOL_SCHEMAS,
         tool_handlers: Mapping[str, Callable[..., ToolResult]] = TOOL_HANDLERS,
         max_steps: int = MAX_STEPS,
+        trace: Callable[[str], None] | None = None,
     ) -> None:
         """Store the explicit collaborators and finite loop budget."""
         if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps <= 0:
@@ -30,6 +38,7 @@ class Agent:
         self._tool_schemas = tuple(tool_schemas)
         self._tool_handlers = dict(tool_handlers)
         self._max_steps = max_steps
+        self._trace = trace
 
     def run(self, task: str) -> str:
         """Run the decide-act-observe loop until text completion or a fatal error."""
@@ -41,7 +50,7 @@ class Agent:
             {"role": "user", "content": task},
         ]
 
-        for _step in range(self._max_steps):
+        for step in range(1, self._max_steps + 1):
             try:
                 response = self._llm_client.send(history, tools=self._tool_schemas)
             except LLMError:
@@ -62,6 +71,10 @@ class Agent:
                     self._tool_schemas,
                     self._tool_handlers,
                 )
+                if self._trace is not None:
+                    self._trace(
+                        _format_trace(step, self._max_steps, tool_call, result)
+                    )
                 history.append(_tool_output_item(tool_call.call_id, result))
 
         raise AgentError(f"Agent exceeded the maximum of {self._max_steps} steps.")
@@ -147,3 +160,39 @@ def _tool_output_item(call_id: str, result: ToolResult) -> InputItem:
         "call_id": call_id,
         "output": serialized_result,
     }
+
+
+def _format_trace(
+    step: int, max_steps: int, tool_call: ToolCall, result: ToolResult
+) -> str:
+    """Format one observable tool action without provider or reasoning details."""
+    safe_arguments: dict[str, object] = {}
+    for name, value in tool_call.arguments.items():
+        if name == "content" and isinstance(value, str):
+            safe_arguments[name] = f"[text content omitted: {len(value)} characters]"
+        elif isinstance(value, str):
+            safe_arguments[name] = _redact_text(value)
+        else:
+            safe_arguments[name] = value
+
+    lines = [
+        f"[Step {step}/{max_steps}]",
+        "",
+        f"Tool: {tool_call.name}",
+        "Arguments:",
+        json.dumps(safe_arguments, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "Result:",
+        f"success: {str(result.success).lower()}",
+    ]
+    if result.output:
+        lines.extend(("output:", _redact_text(result.output)))
+    if result.error:
+        lines.extend(("error:", _redact_text(result.error)))
+    return "\n".join(lines)
+
+
+def _redact_text(text: str) -> str:
+    """Hide common credential assignments and API-key-shaped tokens in trace text."""
+    redacted = _SECRET_ASSIGNMENT.sub(r"\1[redacted]", text)
+    return _SECRET_TOKEN.sub("[redacted]", redacted)
