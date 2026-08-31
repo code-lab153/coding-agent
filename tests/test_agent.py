@@ -1101,3 +1101,46 @@ def test_denied_command_does_not_satisfy_verification_gate() -> None:
         item.get("role") == "system" and "no successful verification" in item.get("content", "")
         for item in gate_messages
     )
+
+
+def test_agent_keeps_canonical_history_full_while_sending_compacted_old_results() -> None:
+    responses = [
+        tool_response(f"call_{index}", "read_file", {"path": f"file_{index}.py"})
+        for index in range(6)
+    ]
+    responses.append(LLMResponse("Done."))
+    fake_llm = FakeLLMClient(responses)
+    full_result = "完整 Unicode 工具结果 " + "x" * 3_000
+
+    agent = Agent(
+        fake_llm,
+        tool_handlers={"read_file": lambda path: ToolResult(True, full_result)},
+    )
+
+    assert agent.run("Inspect several files") == "Done."
+
+    canonical_first = next(
+        item
+        for item in agent.canonical_history
+        if item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_0"
+    )
+    canonical_result = json.loads(canonical_first["output"])
+    assert canonical_result["output"] == full_result
+
+    final_model_input = fake_llm.calls[-1]["messages"]
+    compacted_first = next(
+        item
+        for item in final_model_input
+        if item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_0"
+    )
+    compacted_result = json.loads(compacted_first["output"])
+    assert "old tool output compacted" in compacted_result["output"]
+    recent_result = next(
+        item
+        for item in final_model_input
+        if item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_5"
+    )
+    assert json.loads(recent_result["output"])["output"] == full_result

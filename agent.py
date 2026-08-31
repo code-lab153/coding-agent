@@ -7,6 +7,7 @@ import re
 
 import config
 from config import MAX_STEPS
+from context_manager import ContextManager
 from llm import InputItem, LLMClient, LLMError, ToolCall
 from prompts import SYSTEM_PROMPT
 from tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolResult
@@ -67,6 +68,7 @@ class Agent:
         self._max_steps = max_steps
         self._trace = trace
         self.task_state: TaskState | None = None
+        self.canonical_history: list[InputItem] = []
 
     def run(self, task: str) -> str:
         """Run the decide-act-observe loop until text completion or a fatal error."""
@@ -88,12 +90,15 @@ class Agent:
                 }
             )
         history.append({"role": "user", "content": task})
+        self.canonical_history = history
+        context_manager = ContextManager(static_item_count=len(history))
         previous_fingerprint: str | None = None
         consecutive_repeat_count = 0
 
         for step in range(1, self._max_steps + 1):
             try:
-                response = self._llm_client.send(history, tools=self._tool_schemas)
+                model_input = context_manager.build_context(history, state)
+                response = self._llm_client.send(model_input, tools=self._tool_schemas)
             except LLMError:
                 raise AgentError("Agent stopped because model communication failed.") from None
 
@@ -107,7 +112,9 @@ class Agent:
                                 "content": _VERIFICATION_REQUIRED_OBSERVATION,
                             }
                         )
+                        context_manager.record_completed_step(len(history))
                         continue
+                    history.extend(response.continuation_items)
                     return response.text
                 raise AgentError("Model response did not contain a final answer or tool call.")
 
@@ -145,6 +152,7 @@ class Agent:
                         )
                     )
                 history.append(_tool_output_item(tool_call.call_id, result))
+            context_manager.record_completed_step(len(history))
 
         raise AgentError(f"Agent exceeded the maximum of {self._max_steps} steps.")
 
