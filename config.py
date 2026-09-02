@@ -5,18 +5,19 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
-
+#项目的一些配置
 PROJECT_ROOT = Path(__file__).resolve().parent
 WORKSPACE_ROOT = (PROJECT_ROOT / "workspace").resolve()
 COMMAND_TIMEOUT = 30.0
 MAX_TOOL_OUTPUT = 12_000
-MAX_STEPS = 20
+MAX_STEPS = 30
 
 
 class ConfigurationError(RuntimeError):
     """Raised when required application configuration is missing."""
 
 
+#从环境变量中读取模型配置
 @dataclass(frozen=True)
 class ModelConfig:
     """Model settings read from environment variables."""

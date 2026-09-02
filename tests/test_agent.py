@@ -370,7 +370,7 @@ def test_trace_shows_step_tool_arguments_and_successful_result() -> None:
     ).run("Read main.py")
 
     assert len(trace) == 1
-    assert trace[0].splitlines()[0] == "[Step 1/20]"
+    assert trace[0].splitlines()[0] == f"[Step 1/{config.MAX_STEPS}]"
     assert "Tool: read_file" in trace[0]
     assert '"path": "main.py"' in trace[0]
     assert "success: true" in trace[0]

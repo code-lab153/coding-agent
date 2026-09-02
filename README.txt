@@ -1,30 +1,34 @@
 Coding Agent
 
-Git 仓库地址：
+Git 仓库地址
 https://github.com/code-lab153/coding-agent
 
-一、运行方式
+一、如何运行
 
-建议使用 Python 3.11。安装依赖后，设置以下环境变量：
+项目需要 Python 3.11，模型服务须兼容 OpenAI Responses API。
 
-MODEL_API_KEY：模型 API Key
-MODEL_NAME：模型名称
-MODEL_BASE_URL：OpenAI-compatible API 地址（可选）
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
 
-运行命令：
+在 PowerShell 中设置环境变量：
 
-python main.py "你的编程任务"
+$env:MODEL_API_KEY="你的API Key"
+$env:MODEL_NAME="模型名称"
+$env:MODEL_BASE_URL="模型服务地址"
 
-Agent 默认在 workspace/ 目录中进行文件读取、代码修改和命令执行。API Key 不应写入仓库。
+运行：
+
+python main.py --trace compact "你的编程任务"
+
+也可省略任务参数，启动后再输入任务；使用 --trace full 可查看完整工具输出。Agent 只在 workspace/ 中操作，请勿把真实密钥写入仓库。
 
 二、特色功能
 
-本项目未使用 LangChain、OpenAI Agents SDK、AutoGen 等 Agent 框架，自行实现完整 Coding Agent Loop。LLM 根据当前上下文生成结构化 ToolCall，Controller 在本地执行工具，并将 ToolResult 返回模型形成“决策—执行—反馈”的循环。
+本项目未使用 Agent 框架，自行实现“模型决策—工具执行—结果反馈”的循环。Agent 提供 list_files、read_file、search_text、write_file、edit_file、run_command 六种工具，可以浏览项目、检索和修改代码并运行测试。
 
-Agent 提供 list_files、read_file、search_text、write_file、edit_file、run_command 六种工具，支持项目浏览、代码检索、文件创建、精确修改以及测试和命令执行。
+系统支持 AGENTS.md 项目规则、TaskState 状态记录、修改后的验证门、重复调用检测、命令安全策略和上下文压缩。完整历史单独保留，模型输入会精简较旧的大型工具输出，在控制上下文长度的同时保留关键证据。
 
-项目进一步实现 TaskState 任务状态管理、修改后的 Verification Gate、重复工具调用检测、AGENTS.md 项目级指令、轻量 Command Policy 和结构感知 Context Manager。Canonical History 保留完整历史，模型输入对较旧的大型工具结果进行安全压缩，以支持更长的编程任务。
+三、其他说明
 
-三、演示任务
-
-demo/csv_showcase/ 中提供一个只有需求、验收测试和样例 CSV 数据的编程任务，不包含实现代码。将其复制到 workspace/ 后运行 Agent，可复现 Agent 从零构建 Tkinter CSV Data Analyzer、执行测试并根据反馈完成修改和验证的全过程。
+tests/ 包含主项目自动化测试；demo/csv_showcase/ 提供由任务说明、验收测试和样例数据组成的演示项目。将演示内容复制到 workspace/ 后运行 Agent，可观察它从零实现 CSV 分析程序并通过测试的过程。

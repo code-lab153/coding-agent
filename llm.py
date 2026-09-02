@@ -57,16 +57,20 @@ class LLMClient:
         tools: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
     ) -> LLMResponse:
         """Send messages and normalize text plus requested function calls."""
+        #检查消息是不是合法
         normalized_messages = _validate_input_items(messages)
+        #准备请求，包括模型，以及对应的消息
         request_options: dict[str, Any] = {
             "model": self._config.model_name,
             "input": normalized_messages,
         }
+        #如果Agent有工具，需要加入工具和对应的参数
         if tools:
             request_options["tools"] = list(tools)
             request_options["parallel_tool_calls"] = False
 
         try:
+            #实际上会传入当前整理好的上下文作为message，以及模型可以申请使用的工具说明，然后得到相应的返回结果，并包装成LLMResponse对象返回
             provider_response: Any = self._client.responses.create(**request_options)
         except Exception:
             raise LLMError(

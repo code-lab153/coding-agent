@@ -41,11 +41,11 @@ class AgentError(RuntimeError):
 class TaskState:
     """Objective execution facts for one Agent run, separate from conversation."""
 
-    original_goal: str
-    workspace_changed: bool = False
-    changes_since_verification: bool = False
-    last_verification_command: str | None = None
-    verification_evidence: str | None = None
+    original_goal: str  #初始的任务
+    workspace_changed: bool = False #工作区是否被修改过
+    changes_since_verification: bool = False    #表示是不是有未验证的修改
+    last_verification_command: str | None = None    #最后一次成功的验证命令
+    verification_evidence: str | None = None    #记录验证命令的输出（一小部分，最多500字符左右），方便后续分析和调试
 
 
 class Agent:
@@ -54,10 +54,10 @@ class Agent:
     def __init__(
         self,
         llm_client: LLMClient,
-        tool_schemas: Sequence[dict[str, object]] = TOOL_SCHEMAS,
-        tool_handlers: Mapping[str, Callable[..., ToolResult]] = TOOL_HANDLERS,
-        max_steps: int = MAX_STEPS,
-        trace: Callable[[str], None] | None = None,
+        tool_schemas: Sequence[dict[str, object]] = TOOL_SCHEMAS,   #给大模型看的工具说明
+        tool_handlers: Mapping[str, Callable[..., ToolResult]] = TOOL_HANDLERS, #可以真正执行的python函数（工具）
+        max_steps: int = MAX_STEPS, #最多请求模型的轮数
+        trace: Callable[[str], None] | None = None, #运行过程的输出函数，每次工具执行都会打印到终端
     ) -> None:
         """Store the explicit collaborators and finite loop budget."""
         if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps <= 0:
@@ -68,15 +68,25 @@ class Agent:
         self._max_steps = max_steps
         self._trace = trace
         self.task_state: TaskState | None = None
-        self.canonical_history: list[InputItem] = []
+        self.canonical_history: list[InputItem] = []    #保存完整的运行历史，包括模型的输出和工具的输出，方便后续分析和调试
 
     def run(self, task: str) -> str:
         """Run the decide-act-observe loop until text completion or a fatal error."""
+        #检查任务是否合法
         if not isinstance(task, str) or not task.strip():
             raise AgentError("Task must be a non-empty string.")
 
+        #初始化任务状态，原始目标即为用户输入的任务
         state = TaskState(original_goal=task)
         self.task_state = state
+        """
+        加载项目的规则，此函数会查找：workspace/AGENTS.md，若存在则读取里面的项目规则（包含project_instructions, instruction_trace两类）
+        eg：
+        不要修改验收测试
+        不要安装第三方依赖
+        使用 tkinter
+        完成前运行测试
+        """
         project_instructions, instruction_trace = _load_project_instructions()
         if self._trace is not None and instruction_trace is not None:
             self._trace(instruction_trace)
@@ -95,17 +105,29 @@ class Agent:
         previous_fingerprint: str | None = None
         consecutive_repeat_count = 0
 
+        #进入agent循环，每次循环会向大模型发送消息，获取大模型的输出，判断是否有工具调用，如果有则执行工具调用，并将工具调用的结果加入历史中
+        #最多20轮
         for step in range(1, self._max_steps + 1):
             try:
+                #每一轮先整理上下文，包括历史消息和任务状态，构建模型输入
                 model_input = context_manager.build_context(history, state)
-                response = self._llm_client.send(model_input, tools=self._tool_schemas)
+                response = self._llm_client.send(model_input, tools=self._tool_schemas) #调用模型并得到返回
             except LLMError:
                 raise AgentError("Agent stopped because model communication failed.") from None
 
+            #首先检查模型的输出中是否有工具调用，如果没有工具调用，则说明模型已经给出了最终答案，直接返回即可
             if not response.tool_calls:
+                #顺便判断模型的输出是否为空，如果为空，则说明模型没有给出最终答案，也没有工具调用，说明模型的输出不合法，抛出异常
                 if response.text.strip():
+                    #若工作区已经被修改，并且最新修改还没有被验证，则不允许结束
                     if state.workspace_changed and state.changes_since_verification:
                         history.extend(response.continuation_items)
+                        """
+                        并且还会加入一条系统提示：eg：
+                            工作区已经发生修改，
+                            但最新修改后没有成功运行验证命令。
+                            请先运行适当的验证命令。
+                        """
                         history.append(
                             {
                                 "role": "system",
@@ -113,17 +135,23 @@ class Agent:
                             }
                         )
                         context_manager.record_completed_step(len(history))
+                        #进入下一轮
                         continue
                     history.extend(response.continuation_items)
                     return response.text
                 raise AgentError("Model response did not contain a final answer or tool call.")
 
+            #如果返回没有总结好的历史信息，则说明模型的输出不合法，抛出异常，否则加入历史中
             if not response.continuation_items:
                 raise AgentError("Model tool-call response lacked continuation history.")
             history.extend(response.continuation_items)
 
             tool_count = len(response.tool_calls)
+            #遍历模型返回的工具调用列表，执行每一个工具调用，并将结果加入历史中
+            #但在本项目中，每次模型调用只会返回一个工具调用，所以这里的循环实际上只会执行一次
             for tool_index, tool_call in enumerate(response.tool_calls, start=1):
+                #用于检测连续重复的工具调用，若连续重复超过3次，则不再执行工具调用，而是直接返回错误
+                #用工具名和参数来生成一个指纹，若连续3次指纹相同，则说明连续重复调用了同一个工具
                 fingerprint = _tool_call_fingerprint(tool_call)
                 if fingerprint == previous_fingerprint:
                     consecutive_repeat_count += 1
@@ -131,15 +159,26 @@ class Agent:
                     previous_fingerprint = fingerprint
                     consecutive_repeat_count = 1
 
+                #若连续重复调用超过3次，则不再执行工具调用，而是直接返回错误
+                #否则执行工具调用，并将结果加入历史中
                 if consecutive_repeat_count >= _REPEAT_THRESHOLD:
                     result = ToolResult(False, error=_REPEATED_ACTION_ERROR)
+                #若没超过次数，则执行工具调用，并将结果加入历史中
                 else:
                     result = _dispatch_tool_call(
                         tool_call,
                         self._tool_schemas,
                         self._tool_handlers,
                     )
+                #更新taskstate
+                """
+                一共有六种工具的调用，但是只有三种工具的调用会修改工作区，分别是：write_file, edit_file, run_command
+                其中，write_file和edit_file会直接修改工作区，run_command则是执行命令，可能会修改工作区，也可能不会修改工作区，所以需要判断一下
+                （1）如果执行write_file或edit_file，则将workspace_changed和changes_since_verification都置为True
+                （2）如果执行run_command，则需要判断
+                """
                 _update_task_state(state, tool_call, result)
+                #如果传入了trace函数，则将工具调用的结果打印出来，方便调试
                 if self._trace is not None:
                     self._trace(
                         _format_trace(
@@ -151,6 +190,7 @@ class Agent:
                             tool_count,
                         )
                     )
+                #将工具的结果加入到历史中，方便后续的模型调用使用
                 history.append(_tool_output_item(tool_call.call_id, result))
             context_manager.record_completed_step(len(history))
 
@@ -194,21 +234,24 @@ def _update_task_state(
     state: TaskState, tool_call: ToolCall, result: ToolResult
 ) -> None:
     """Record only successful, controller-observable execution facts."""
+    #如果失败不更新状态
     if not result.success:
         return
     if tool_call.name in {"write_file", "edit_file"}:
-        state.workspace_changed = True
-        state.changes_since_verification = True
+        state.workspace_changed = True  #表示工作区已经被修改过
+        state.changes_since_verification = True #表示有未验证的修改
         return
+    #如果当前工具调用是run_command，并且当前工作区有未验证的修改，则更新状态，继续向下执行
     if tool_call.name != "run_command" or not state.changes_since_verification:
         return
 
+    #得到执行命令的参数，如果参数中没有command，则不更新状态
     command = tool_call.arguments.get("command")
     if not isinstance(command, str):
         return
-    state.changes_since_verification = False
-    state.last_verification_command = command
-    state.verification_evidence = _concise_verification_evidence(result.output)
+    state.changes_since_verification = False    #把未验证变成已验证
+    state.last_verification_command = command   #保存验证命令
+    state.verification_evidence = _concise_verification_evidence(result.output) #保存验证证据
 
 
 def _concise_verification_evidence(output: str) -> str:
